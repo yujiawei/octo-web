@@ -1,236 +1,178 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { flowApi } from '../api';
-import type { FlowDef, Definition, Execution } from '../types';
-import FlowEditor from '../components/FlowEditor';
-import FlowToolbar from '../components/FlowToolbar';
-import ExecutionView from '../components/ExecutionView';
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Button, Spin, Tag, Toast } from "@douyinfe/semi-ui";
+import { WKApp } from "@octo/base";
+import {
+  activateFlow,
+  deactivateFlow,
+  executeFlow,
+  getFlow,
+  updateFlow,
+} from "../api/flowApi";
+import type { Flow, FlowDefinition, FlowStatus } from "../types/flow";
+import FlowEditor from "../components/FlowEditor";
+import FlowExecutionsPage from "./FlowExecutionsPage";
 
-interface FlowEditorPageProps {
+interface Props {
   flowId: string;
-  onBack: () => void;
+  /** Invoked when the user clicks the back button. Defaults to closing the right pane. */
+  onBack?: () => void;
+  /** Invoked to open the executions page for this flow. Defaults to right-pane push. */
+  onOpenExecutions?: (flowId: string, executionId?: string | null) => void;
 }
 
-type ViewMode = 'editor' | 'history' | 'execution';
+const STATUS_COLOR: Record<FlowStatus, "grey" | "green" | "amber"> = {
+  draft: "grey",
+  active: "green",
+  disabled: "amber",
+};
 
-const FlowEditorPage: React.FC<FlowEditorPageProps> = ({ flowId, onBack }) => {
-  const [flow, setFlow] = useState<FlowDef | null>(null);
+export default function FlowEditorPage({ flowId, onBack, onOpenExecutions }: Props) {
+  const [flow, setFlow] = useState<Flow | null>(null);
+  const [definition, setDefinition] = useState<FlowDefinition>({ nodes: [], edges: [] });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>('editor');
-  const [executions, setExecutions] = useState<Execution[]>([]);
-  const [selectedExecution, setSelectedExecution] = useState<Execution | null>(null);
-  const currentDef = useRef<Definition | null>(null);
+  const [dirty, setDirty] = useState(false);
+  const definitionRef = useRef(definition);
+  definitionRef.current = definition;
 
-  // Load flow data
   useEffect(() => {
     let cancelled = false;
-    const load = async () => {
-      setLoading(true);
-      try {
-        const data = await flowApi.get(flowId);
-        if (!cancelled) {
-          setFlow(data);
-          currentDef.current = data.definition;
-        }
-      } catch (err: any) {
-        if (!cancelled) setError(err.message);
-      } finally {
+    setLoading(true);
+    getFlow(flowId)
+      .then((f) => {
+        if (cancelled) return;
+        setFlow(f);
+        setDefinition(f.definition ?? { nodes: [], edges: [] });
+        setDirty(false);
+      })
+      .catch((e) => Toast.error(`加载失败：${(e as Error).message}`))
+      .finally(() => {
         if (!cancelled) setLoading(false);
-      }
+      });
+    return () => {
+      cancelled = true;
     };
-    load();
-    return () => { cancelled = true; };
   }, [flowId]);
 
-  // Track definition changes from editor
-  const onDefinitionChange = useCallback((def: Definition) => {
-    currentDef.current = def;
+  const handleDefinitionChange = useCallback((next: FlowDefinition) => {
+    setDefinition(next);
+    setDirty(true);
   }, []);
 
-  // Save
-  const handleSave = useCallback(async () => {
-    if (!flow || !currentDef.current) return;
+  const handleSave = async () => {
+    if (!flow) return;
     setSaving(true);
-    setError(null);
     try {
-      const updated = await flowApi.update(flow.id, {
-        definition: currentDef.current,
-        name: flow.name,
-        description: flow.description,
-      } as any);
+      const updated = await updateFlow(flow.id, { definition: definitionRef.current });
       setFlow(updated);
-    } catch (err: any) {
-      setError(err.message);
+      setDirty(false);
+      Toast.success("已保存");
+    } catch (e) {
+      Toast.error(`保存失败：${(e as Error).message}`);
     } finally {
       setSaving(false);
     }
-  }, [flow]);
+  };
 
-  // Name change
-  const handleNameChange = useCallback(
-    (name: string) => {
-      if (flow) setFlow({ ...flow, name });
-    },
-    [flow],
-  );
-
-  // Activate / Deactivate
-  const handleActivate = useCallback(async () => {
+  const handleActivate = async () => {
     if (!flow) return;
     try {
-      await flowApi.activate(flow.id);
-      setFlow({ ...flow, status: 'active' });
-    } catch (err: any) {
-      setError(err.message);
+      const next = await activateFlow(flow.id);
+      setFlow(next);
+      Toast.success("已激活");
+    } catch (e) {
+      Toast.error(`激活失败：${(e as Error).message}`);
     }
-  }, [flow]);
+  };
 
-  const handleDeactivate = useCallback(async () => {
+  const handleDeactivate = async () => {
     if (!flow) return;
     try {
-      await flowApi.deactivate(flow.id);
-      setFlow({ ...flow, status: 'draft' });
-    } catch (err: any) {
-      setError(err.message);
+      const next = await deactivateFlow(flow.id);
+      setFlow(next);
+      Toast.success("已停用");
+    } catch (e) {
+      Toast.error(`停用失败：${(e as Error).message}`);
     }
-  }, [flow]);
+  };
 
-  // Manual run
-  const handleRun = useCallback(async () => {
+  const handleExecute = async () => {
     if (!flow) return;
     try {
-      const exec = await flowApi.execute(flow.id);
-      setSelectedExecution(exec);
-      setViewMode('execution');
-    } catch (err: any) {
-      setError(err.message);
+      const exec = await executeFlow(flow.id);
+      Toast.success("已触发执行");
+      if (onOpenExecutions) {
+        onOpenExecutions(flow.id, exec.id);
+      } else {
+        WKApp.routeRight.push(<FlowExecutionsPage flowId={flow.id} executionId={exec.id} />);
+      }
+    } catch (e) {
+      Toast.error(`触发失败：${(e as Error).message}`);
     }
-  }, [flow]);
+  };
 
-  // Execution history
-  const handleHistory = useCallback(async () => {
+  const openExecutions = () => {
     if (!flow) return;
-    try {
-      const res = await flowApi.listExecutions(flow.id);
-      setExecutions(res.items || []);
-      setViewMode('history');
-    } catch (err: any) {
-      setError(err.message);
+    if (onOpenExecutions) {
+      onOpenExecutions(flow.id);
+    } else {
+      WKApp.routeRight.push(<FlowExecutionsPage flowId={flow.id} />);
     }
-  }, [flow]);
+  };
 
-  const handleViewExecution = useCallback(async (execId: string) => {
-    try {
-      const exec = await flowApi.getExecution(execId);
-      setSelectedExecution(exec);
-      setViewMode('execution');
-    } catch (err: any) {
-      setError(err.message);
+  const back = () => {
+    if (onBack) {
+      onBack();
+    } else {
+      WKApp.routeRight.popToRoot();
     }
-  }, []);
+  };
 
-  if (loading) {
-    return <div className="flow-editor-page flow-editor-page--loading">加载中…</div>;
-  }
-
-  if (!flow) {
+  if (loading || !flow) {
     return (
-      <div className="flow-editor-page flow-editor-page--error">
-        <p>Flow not found</p>
-        <button onClick={onBack}>← 返回列表</button>
+      <div style={{ padding: 32 }}>
+        <Spin />
       </div>
     );
   }
 
-  return (
-    <div className="flow-editor-page">
-      {error && (
-        <div className="flow-editor-page__error">
-          <span>❌ {error}</span>
-          <button onClick={() => setError(null)}>✕</button>
-        </div>
-      )}
+  // Webhook URL is conventionally exposed under /api/v1/flows/:id/webhook —
+  // we hand it to the trigger-webhook config form for display.
+  const apiBase = (WKApp.apiClient.config.apiURL || "/api/v1/").replace(/\/$/, "");
+  const webhookUrl = `${window.location.origin}${apiBase}/flows/${flow.id}/webhook`;
 
-      <div className="flow-editor-page__nav">
-        <button className="flow-editor-page__back" onClick={onBack}>
-          ← 返回
-        </button>
-        {viewMode !== 'editor' && (
-          <button
-            className="flow-editor-page__nav-btn"
-            onClick={() => setViewMode('editor')}
-          >
-            编辑器
-          </button>
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+      <div
+        style={{
+          padding: "8px 16px",
+          borderBottom: "1px solid var(--semi-color-border)",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          background: "var(--semi-color-bg-1)",
+        }}
+      >
+        <Button size="small" onClick={back}>← 列表</Button>
+        <div style={{ fontWeight: 600, marginLeft: 8 }}>{flow.name}</div>
+        <Tag color={STATUS_COLOR[flow.status]} style={{ marginLeft: 4 }}>{flow.status}</Tag>
+        {dirty && <Tag color="orange">未保存</Tag>}
+        <div style={{ flex: 1 }} />
+        <Button type="primary" loading={saving} onClick={handleSave}>保存</Button>
+        {flow.status === "active" ? (
+          <Button onClick={handleDeactivate}>停用</Button>
+        ) : (
+          <Button onClick={handleActivate}>激活</Button>
         )}
+        <Button onClick={handleExecute}>手动执行</Button>
+        <Button onClick={openExecutions}>执行历史</Button>
       </div>
 
-      <FlowToolbar
-        name={flow.name}
-        status={flow.status}
-        saving={saving}
-        onNameChange={handleNameChange}
-        onSave={handleSave}
-        onActivate={handleActivate}
-        onDeactivate={handleDeactivate}
-        onRun={handleRun}
-        onHistory={handleHistory}
+      <FlowEditor
+        definition={definition}
+        onChange={handleDefinitionChange}
+        webhookUrl={webhookUrl}
       />
-
-      {viewMode === 'editor' && (
-        <FlowEditor
-          initialDefinition={flow.definition}
-          onDefinitionChange={onDefinitionChange}
-          className="flow-editor-page__editor"
-        />
-      )}
-
-      {viewMode === 'history' && (
-        <div className="flow-editor-page__history">
-          <h3>执行历史</h3>
-          {executions.length === 0 ? (
-            <p>暂无执行记录</p>
-          ) : (
-            <table className="flow-list-table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>状态</th>
-                  <th>开始时间</th>
-                  <th>结束时间</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {executions.map((exec) => (
-                  <tr key={exec.id}>
-                    <td className="flow-list-table__mono">{exec.id.slice(0, 8)}…</td>
-                    <td>
-                      <span className={`flow-badge flow-badge--${exec.status}`}>
-                        {exec.status}
-                      </span>
-                    </td>
-                    <td>{exec.started_at || '-'}</td>
-                    <td>{exec.finished_at || '-'}</td>
-                    <td>
-                      <button onClick={() => handleViewExecution(exec.id)}>
-                        查看
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      )}
-
-      {viewMode === 'execution' && selectedExecution && (
-        <ExecutionView execution={selectedExecution} definition={flow.definition} />
-      )}
     </div>
   );
-};
-
-export default FlowEditorPage;
+}

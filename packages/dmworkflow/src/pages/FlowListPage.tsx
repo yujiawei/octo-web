@@ -1,201 +1,229 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { flowApi } from '../api';
-import type { FlowDef, FlowStatus } from '../types';
+import React, { useCallback, useEffect, useState } from "react";
+import { Button, Dropdown, Empty, Modal, Popconfirm, Spin, Tag, Toast, Input } from "@douyinfe/semi-ui";
+import { IconPlus, IconRefresh, IconMore } from "@douyinfe/semi-icons";
+import {
+  activateFlow,
+  createFlow,
+  deactivateFlow,
+  deleteFlow,
+  listFlows,
+} from "../api/flowApi";
+import type { ExecutionStatus, Flow, FlowStatus } from "../types/flow";
 
-interface FlowListPageProps {
-  spaceId?: string;
-  onEdit: (flowId: string) => void;
-  onHistory: (flowId: string) => void;
-  onCreate: (flow: FlowDef) => void;
-}
-
-const STATUS_BADGE: Record<FlowStatus, { label: string; className: string }> = {
-  draft: { label: '草稿', className: 'flow-badge flow-badge--draft' },
-  active: { label: '已激活', className: 'flow-badge flow-badge--active' },
-  archived: { label: '已归档', className: 'flow-badge flow-badge--archived' },
+const STATUS_COLOR: Record<FlowStatus, "grey" | "green" | "amber"> = {
+  draft: "grey",
+  active: "green",
+  disabled: "amber",
 };
 
-const FlowListPage: React.FC<FlowListPageProps> = ({
-  spaceId,
-  onEdit,
-  onHistory,
-  onCreate,
-}) => {
-  const [flows, setFlows] = useState<FlowDef[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [filterStatus, setFilterStatus] = useState<string>('');
-  const [deleting, setDeleting] = useState<string | null>(null);
+const EXEC_COLOR: Record<ExecutionStatus, "grey" | "green" | "red" | "blue" | "orange"> = {
+  pending: "grey",
+  running: "blue",
+  success: "green",
+  failed: "red",
+  cancelled: "orange",
+};
 
-  const loadFlows = useCallback(async () => {
+interface Props {
+  /** Open a flow's editor in the right pane. */
+  onOpenEditor: (flowId: string) => void;
+  /** Open a flow's execution history in the right pane. */
+  onOpenExecutions: (flowId: string) => void;
+}
+
+/**
+ * Octo Flow list — rendered inside the ~300 px left panel. Layout is therefore
+ * compact: a single column of cards, with bulk actions tucked behind a kebab
+ * menu. Editor / executions navigation is delegated to callbacks so this page
+ * does not need to know that they live on the right pane.
+ */
+export default function FlowListPage({ onOpenEditor, onOpenExecutions }: Props) {
+  const [flows, setFlows] = useState<Flow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [draftName, setDraftName] = useState("");
+
+  const load = useCallback(() => {
     setLoading(true);
-    setError(null);
-    try {
-      const res = await flowApi.list(spaceId, filterStatus || undefined);
-      setFlows(res.items || []);
-    } catch (err: any) {
-      setError(err.message || 'Failed to load flows');
-    } finally {
-      setLoading(false);
-    }
-  }, [spaceId, filterStatus]);
+    listFlows()
+      .then(setFlows)
+      .catch((e) => Toast.error(`加载失败：${(e as Error).message}`))
+      .finally(() => setLoading(false));
+  }, []);
 
   useEffect(() => {
-    loadFlows();
-  }, [loadFlows]);
+    load();
+  }, [load]);
 
-  const handleCreate = useCallback(async () => {
-    try {
-      const flow = await flowApi.create({
-        space_id: spaceId || '',
-        name: 'Untitled Flow',
-        description: '',
-        definition: { nodes: [], edges: [], triggers: [] },
-      });
-      onCreate(flow);
-    } catch (err: any) {
-      setError(err.message || 'Failed to create flow');
+  const handleCreate = async () => {
+    const name = draftName.trim();
+    if (!name) {
+      Toast.warning("请输入 Flow 名称");
+      return;
     }
-  }, [spaceId, onCreate]);
-
-  const handleDelete = useCallback(
-    async (id: string) => {
-      if (!window.confirm('确认删除此 Flow？此操作不可撤销。')) return;
-      setDeleting(id);
-      try {
-        await flowApi.delete(id);
-        setFlows((prev) => prev.filter((f) => f.id !== id));
-      } catch (err: any) {
-        setError(err.message || 'Failed to delete flow');
-      } finally {
-        setDeleting(null);
-      }
-    },
-    [],
-  );
-
-  const handleToggleActive = useCallback(
-    async (flow: FlowDef) => {
-      try {
-        if (flow.status === 'active') {
-          await flowApi.deactivate(flow.id);
-        } else {
-          await flowApi.activate(flow.id);
-        }
-        loadFlows();
-      } catch (err: any) {
-        setError(err.message || 'Failed to toggle flow status');
-      }
-    },
-    [loadFlows],
-  );
-
-  const formatDate = (iso: string) => {
+    setCreating(true);
     try {
-      return new Date(iso).toLocaleDateString('zh-CN', {
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
+      const flow = await createFlow({
+        name,
+        definition: { nodes: [], edges: [] },
       });
-    } catch {
-      return iso;
+      setCreateOpen(false);
+      setDraftName("");
+      // Optimistically prepend so the user sees it before the next reload.
+      setFlows((cur) => [flow, ...cur]);
+      onOpenEditor(flow.id);
+    } catch (e) {
+      Toast.error(`创建失败：${(e as Error).message}`);
+    } finally {
+      setCreating(false);
     }
   };
 
-  return (
-    <div className="flow-list-page">
-      <div className="flow-list-page__header">
-        <h1 className="flow-list-page__title">Flows</h1>
-        <div className="flow-list-page__actions">
-          <select
-            className="flow-list-page__filter"
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
+  const handleActivateToggle = async (flow: Flow) => {
+    try {
+      const next = flow.status === "active" ? await deactivateFlow(flow.id) : await activateFlow(flow.id);
+      setFlows((cur) => cur.map((f) => (f.id === flow.id ? next : f)));
+      Toast.success(next.status === "active" ? "已激活" : "已停用");
+    } catch (e) {
+      Toast.error(`操作失败：${(e as Error).message}`);
+    }
+  };
+
+  const handleDelete = async (flow: Flow) => {
+    try {
+      await deleteFlow(flow.id);
+      setFlows((cur) => cur.filter((f) => f.id !== flow.id));
+      Toast.success("已删除");
+    } catch (e) {
+      Toast.error(`删除失败：${(e as Error).message}`);
+    }
+  };
+
+  const renderItem = (flow: Flow) => {
+    const lastExec = flow.last_execution_status as ExecutionStatus | null | undefined;
+    return (
+      <div
+        key={flow.id}
+        onClick={() => onOpenEditor(flow.id)}
+        style={{
+          padding: "10px 12px",
+          borderBottom: "1px solid var(--semi-color-border)",
+          cursor: "pointer",
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <div
+            style={{
+              flex: 1,
+              minWidth: 0,
+              fontWeight: 500,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={flow.name}
           >
-            <option value="">全部状态</option>
-            <option value="draft">草稿</option>
-            <option value="active">已激活</option>
-            <option value="archived">已归档</option>
-          </select>
-          <button className="flow-list-page__btn flow-list-page__btn--primary" onClick={handleCreate}>
-            + 新建 Flow
-          </button>
+            {flow.name}
+          </div>
+          <Tag size="small" color={STATUS_COLOR[flow.status]}>{flow.status}</Tag>
+          <Dropdown
+            position="bottomRight"
+            trigger="click"
+            render={(
+              <Dropdown.Menu>
+                <Dropdown.Item onClick={() => onOpenEditor(flow.id)}>编辑</Dropdown.Item>
+                <Dropdown.Item onClick={() => handleActivateToggle(flow)}>
+                  {flow.status === "active" ? "停用" : "激活"}
+                </Dropdown.Item>
+                <Dropdown.Item onClick={() => onOpenExecutions(flow.id)}>执行历史</Dropdown.Item>
+                <Dropdown.Divider />
+                <Popconfirm
+                  title="删除 Flow"
+                  content="确认删除该 Flow？此操作不可恢复。"
+                  onConfirm={() => handleDelete(flow)}
+                >
+                  <Dropdown.Item type="danger">删除</Dropdown.Item>
+                </Popconfirm>
+              </Dropdown.Menu>
+            )}
+          >
+            <Button
+              size="small"
+              theme="borderless"
+              icon={<IconMore />}
+              onClick={(e) => e.stopPropagation()}
+            />
+          </Dropdown>
+        </div>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            fontSize: 12,
+            color: "var(--semi-color-text-2)",
+          }}
+        >
+          {lastExec ? (
+            <Tag size="small" color={EXEC_COLOR[lastExec]}>{lastExec}</Tag>
+          ) : (
+            <span>尚未执行</span>
+          )}
+          <span style={{ flex: 1 }} />
+          <span>{flow.created_at ? new Date(flow.created_at).toLocaleDateString() : ""}</span>
         </div>
       </div>
+    );
+  };
 
-      {error && (
-        <div className="flow-list-page__error">
-          <span>❌ {error}</span>
-          <button onClick={() => setError(null)}>✕</button>
-        </div>
-      )}
+  return (
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", boxSizing: "border-box" }}>
+      <div
+        style={{
+          padding: "10px 12px",
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          borderBottom: "1px solid var(--semi-color-border)",
+        }}
+      >
+        <div style={{ fontSize: 16, fontWeight: 600, flex: 1 }}>Octo Flow</div>
+        <Button size="small" icon={<IconRefresh />} onClick={load} aria-label="刷新" />
+        <Button size="small" type="primary" icon={<IconPlus />} onClick={() => setCreateOpen(true)}>
+          新建
+        </Button>
+      </div>
 
-      {loading ? (
-        <div className="flow-list-page__loading">加载中…</div>
-      ) : flows.length === 0 ? (
-        <div className="flow-list-page__empty">
-          <p>暂无 Flow</p>
-          <button className="flow-list-page__btn flow-list-page__btn--primary" onClick={handleCreate}>
-            创建第一个 Flow
-          </button>
-        </div>
-      ) : (
-        <table className="flow-list-table">
-          <thead>
-            <tr>
-              <th>名称</th>
-              <th>状态</th>
-              <th>版本</th>
-              <th>创建时间</th>
-              <th>更新时间</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {flows.map((flow) => {
-              const badge = STATUS_BADGE[flow.status] || STATUS_BADGE.draft;
-              return (
-                <tr key={flow.id}>
-                  <td>
-                    <button
-                      className="flow-list-table__name"
-                      onClick={() => onEdit(flow.id)}
-                    >
-                      {flow.name}
-                    </button>
-                    {flow.description && (
-                      <span className="flow-list-table__desc">{flow.description}</span>
-                    )}
-                  </td>
-                  <td>
-                    <span className={badge.className}>{badge.label}</span>
-                  </td>
-                  <td>v{flow.version}</td>
-                  <td>{formatDate(flow.created_at)}</td>
-                  <td>{formatDate(flow.updated_at)}</td>
-                  <td className="flow-list-table__actions">
-                    <button onClick={() => onEdit(flow.id)} title="编辑">✏️</button>
-                    <button onClick={() => handleToggleActive(flow)} title={flow.status === 'active' ? '停用' : '激活'}>
-                      {flow.status === 'active' ? '⏸' : '▶'}
-                    </button>
-                    <button onClick={() => onHistory(flow.id)} title="执行历史">📋</button>
-                    <button
-                      onClick={() => handleDelete(flow.id)}
-                      disabled={deleting === flow.id}
-                      title="删除"
-                    >
-                      {deleting === flow.id ? '…' : '🗑'}
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+        {loading ? (
+          <div style={{ padding: 24, textAlign: "center" }}>
+            <Spin />
+          </div>
+        ) : flows.length === 0 ? (
+          <Empty
+            style={{ paddingTop: 40 }}
+            description="暂无 Flow，点击右上角「新建」开始编排。"
+          />
+        ) : (
+          flows.map(renderItem)
+        )}
+      </div>
+
+      <Modal
+        title="新建 Flow"
+        visible={createOpen}
+        onCancel={() => setCreateOpen(false)}
+        onOk={handleCreate}
+        confirmLoading={creating}
+        okText="创建"
+      >
+        <div style={{ fontSize: 12, marginBottom: 4 }}>名称</div>
+        <Input value={draftName} onChange={setDraftName} placeholder="my-first-flow" />
+      </Modal>
     </div>
   );
-};
-
-export default FlowListPage;
+}
