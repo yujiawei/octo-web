@@ -1,14 +1,56 @@
+import { WKApp } from '@octo/base';
 import type { FlowDef, Execution } from './types';
 
 const BASE = '/v1';
 
+/**
+ * Inject the same auth headers the rest of the app uses.
+ *
+ * Background: this module talks to the backend with native `fetch`, so
+ * `APIClient`'s axios interceptors (which inject `token` and
+ * `X-Space-Id` for every request the rest of the app makes) do NOT
+ * run. Without this the Flow list/CRUD endpoints come back as
+ *   401 {"msg":"token不能为空，请先登录！"}
+ *
+ * We deliberately read through the documented extension points
+ * `APIClient.shared.config.tokenCallback` / `spaceIdCallback` rather
+ * than reaching into `WKApp.loginInfo.token` directly, so that this
+ * file stays aligned with the *one* place auth-header computation is
+ * declared (`apps/web/src/index.tsx`). When that wiring changes, Flow
+ * picks it up for free.
+ */
+function authHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const token = WKApp.apiClient.config.tokenCallback?.();
+  if (token && token !== '') {
+    headers['token'] = token;
+  }
+  const spaceId = WKApp.apiClient.config.spaceIdCallback?.();
+  if (spaceId && spaceId !== '') {
+    headers['X-Space-Id'] = spaceId;
+  }
+  return headers;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+      ...init?.headers,
+    },
   });
   if (!res.ok) {
     const body = await res.text().catch(() => '');
+    // 401 means our session is no longer valid. The rest of the app
+    // funnels 401s through APIClient's response interceptor, which
+    // calls `logoutCallback` (BaseModule wires it to WKApp.shared.logout).
+    // We're outside that pipeline, so trigger the same logout path
+    // explicitly — otherwise the user stays on a broken Flow page.
+    if (res.status === 401) {
+      WKApp.apiClient.logoutCallback?.();
+    }
     throw new Error(`API ${res.status}: ${body}`);
   }
   // 204 No Content (delete / activate / deactivate) has an empty body —
