@@ -6,18 +6,14 @@ import {
   deactivateFlow,
   executeFlow,
   getFlow,
+  getWebhookUrl,
   updateFlow,
 } from "../api/flowApi";
 import type { Flow, FlowDefinition, FlowStatus } from "../types/flow";
 import FlowEditor from "../components/FlowEditor";
-import FlowExecutionsPage from "./FlowExecutionsPage";
 
 interface Props {
   flowId: string;
-  /** Invoked when the user clicks the back button. Defaults to closing the right pane. */
-  onBack?: () => void;
-  /** Invoked to open the executions page for this flow. Defaults to right-pane push. */
-  onOpenExecutions?: (flowId: string, executionId?: string | null) => void;
 }
 
 const STATUS_COLOR: Record<FlowStatus, "grey" | "green" | "amber"> = {
@@ -26,12 +22,13 @@ const STATUS_COLOR: Record<FlowStatus, "grey" | "green" | "amber"> = {
   disabled: "amber",
 };
 
-export default function FlowEditorPage({ flowId, onBack, onOpenExecutions }: Props) {
+export default function FlowEditorPage({ flowId }: Props) {
   const [flow, setFlow] = useState<Flow | null>(null);
   const [definition, setDefinition] = useState<FlowDefinition>({ nodes: [], edges: [] });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [serverWebhookUrl, setServerWebhookUrl] = useState<string | null>(null);
   const definitionRef = useRef(definition);
   definitionRef.current = definition;
 
@@ -48,6 +45,23 @@ export default function FlowEditorPage({ flowId, onBack, onOpenExecutions }: Pro
       .catch((e) => Toast.error(`加载失败：${(e as Error).message}`))
       .finally(() => {
         if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [flowId]);
+
+  // Best-effort fetch the canonical webhook URL from the server. Failure is
+  // non-fatal — we fall back to a locally-derived URL so the copy button
+  // still works during local dev.
+  useEffect(() => {
+    let cancelled = false;
+    getWebhookUrl(flowId)
+      .then((info) => {
+        if (!cancelled && info.url) setServerWebhookUrl(info.url);
+      })
+      .catch(() => {
+        // silently ignore; fallback URL is computed below
       });
     return () => {
       cancelled = true;
@@ -101,11 +115,7 @@ export default function FlowEditorPage({ flowId, onBack, onOpenExecutions }: Pro
     try {
       const exec = await executeFlow(flow.id);
       Toast.success("已触发执行");
-      if (onOpenExecutions) {
-        onOpenExecutions(flow.id, exec.id);
-      } else {
-        WKApp.routeRight.push(<FlowExecutionsPage flowId={flow.id} executionId={exec.id} />);
-      }
+      WKApp.route.push("/flow/execution", { flowId: flow.id, executionId: exec.id });
     } catch (e) {
       Toast.error(`触发失败：${(e as Error).message}`);
     }
@@ -113,20 +123,10 @@ export default function FlowEditorPage({ flowId, onBack, onOpenExecutions }: Pro
 
   const openExecutions = () => {
     if (!flow) return;
-    if (onOpenExecutions) {
-      onOpenExecutions(flow.id);
-    } else {
-      WKApp.routeRight.push(<FlowExecutionsPage flowId={flow.id} />);
-    }
+    WKApp.route.push("/flow/executions", { flowId: flow.id });
   };
 
-  const back = () => {
-    if (onBack) {
-      onBack();
-    } else {
-      WKApp.routeRight.popToRoot();
-    }
-  };
+  const back = () => WKApp.route.push("/flow");
 
   if (loading || !flow) {
     return (
@@ -136,10 +136,13 @@ export default function FlowEditorPage({ flowId, onBack, onOpenExecutions }: Pro
     );
   }
 
-  // Webhook URL is conventionally exposed under /api/v1/flows/:id/webhook —
-  // we hand it to the trigger-webhook config form for display.
+  // Webhook URL prefers the server-issued value (POST /v1/flows/:id/webhook
+  // is the runtime ingest path; GET returns the canonical URL). When the
+  // server hasn't yet exposed it (or in offline dev) we fall back to the
+  // locally-computed URL so the copy button still does something useful.
   const apiBase = (WKApp.apiClient.config.apiURL || "/api/v1/").replace(/\/$/, "");
-  const webhookUrl = `${window.location.origin}${apiBase}/flows/${flow.id}/webhook`;
+  const fallbackWebhookUrl = `${window.location.origin}${apiBase}/flows/${flow.id}/webhook`;
+  const webhookUrl = serverWebhookUrl || fallbackWebhookUrl;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>

@@ -1,379 +1,345 @@
-import React, { useState, useCallback, useRef, useMemo, useEffect, type DragEvent } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
-  addEdge,
+  ReactFlowProvider,
   Background,
   Controls,
   MiniMap,
-  useNodesState,
-  useEdgesState,
-  BackgroundVariant,
+  addEdge,
+  applyEdgeChanges,
+  applyNodeChanges,
+  useReactFlow,
   type Connection,
-  type Node,
   type Edge,
-  type NodeTypes,
+  type EdgeChange,
+  type Node,
+  type NodeChange,
   type ReactFlowInstance,
-} from '@xyflow/react';
-import '@xyflow/react/dist/style.css';
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
 
-import type { Definition, NodeDef, EdgeDef, NodeType, TriggerType } from '../types';
-import { NODE_TYPE_COLORS } from '../types';
-import TriggerNode from './custom-nodes/TriggerNode';
-import ScriptNode from './custom-nodes/ScriptNode';
-import HttpNode from './custom-nodes/HttpNode';
-import ConditionNode from './custom-nodes/ConditionNode';
-import HumanNode from './custom-nodes/HumanNode';
-import NodeSidebar from './NodeSidebar';
-import NodeConfigPanel from './NodeConfigPanel';
+import type {
+  ExecutionStatus,
+  FlowDefinition,
+  FlowNode,
+  FlowNodeConfig,
+  NodeType,
+} from "../types/flow";
+import Sidebar from "./Sidebar";
+import NodeConfigPanel from "./NodeConfigPanel";
+import FlowNodeView from "./nodes/FlowNodeView";
+import { buildLayeredLayout, isParallelSiblingEdge } from "../utils/flowLayout";
 
-// Register custom node types
-const nodeTypes: NodeTypes = {
-  trigger: TriggerNode,
-  script: ScriptNode,
-  http: HttpNode,
-  condition: ConditionNode,
-  human_action: HumanNode,
-};
+const nodeTypes = { flowNode: FlowNodeView };
 
-// Convert backend Definition → React Flow format
-export function definitionToFlow(def: Definition): { nodes: Node[]; edges: Edge[] } {
-  const nodes: Node[] = (def.nodes || []).map((n) => ({
+interface FlowEditorProps {
+  definition: FlowDefinition;
+  onChange: (next: FlowDefinition) => void;
+  /** Read-only mode for ExecutionView reuse. */
+  readOnly?: boolean;
+  /** Map of node-id → execution status overlay (read-only mode). */
+  statusByNode?: Record<string, ExecutionStatus>;
+  /** Currently selected node id in read-only mode (controlled by parent). */
+  selectedNodeId?: string | null;
+  onSelectNode?: (nodeId: string | null) => void;
+  /** Webhook URL surfaced inside the webhook trigger config form. */
+  webhookUrl?: string;
+}
+
+function toReactFlow(
+  def: FlowDefinition,
+  statusByNode?: Record<string, ExecutionStatus>,
+  layered?: boolean,
+): { nodes: Node[]; edges: Edge[] } {
+  // Read-only execution view applies a layered layout so parallel siblings
+  // render side-by-side and a dashed sibling edge surfaces the same-layer
+  // relationship explicitly. Editing mode keeps user-placed positions.
+  const source: FlowDefinition = layered
+    ? (() => {
+        const { nodes: ln, edges: le } = buildLayeredLayout(def);
+        return { nodes: ln, edges: le };
+      })()
+    : def;
+  const nodes: Node[] = source.nodes.map((n) => ({
     id: n.id,
-    type: n.type === 'bot_action' ? 'script' : n.type,
-    position: n.position || { x: 250, y: 0 },
+    type: "flowNode",
+    position: n.position,
     data: {
-      label: n.label || n.type,
       nodeType: n.type,
-      ...n.config,
+      config: n.config,
+      status: statusByNode?.[n.id],
     },
+    draggable: !layered,
   }));
-
-  // Auto-layout if positions are all zero
-  const allZero = nodes.every((n) => n.position.x === 0 && n.position.y === 0);
-  if (allZero) {
-    nodes.forEach((n, i) => {
-      n.position = { x: 250, y: i * 150 + 50 };
-    });
-  }
-
-  // Add trigger nodes
-  (def.triggers || []).forEach((t, i) => {
-    nodes.unshift({
-      id: `trigger-${t.id}`,
-      type: 'trigger',
-      position: { x: 250, y: -(i + 1) * 150 },
-      data: {
-        label: t.type.charAt(0).toUpperCase() + t.type.slice(1) + ' Trigger',
-        triggerType: t.type,
-        nodeType: 'trigger',
-        config: t.config,
-      },
-    });
+  const edges: Edge[] = source.edges.map((e) => {
+    const isSibling = isParallelSiblingEdge(e.id);
+    return {
+      id: e.id,
+      source: e.source,
+      target: e.target,
+      label: isSibling ? undefined : e.label ?? e.branch,
+      // Dashed, animation-free, lower contrast — visually distinct from real
+      // data-flow edges so users don't mistake them for actual control flow.
+      animated: false,
+      type: isSibling ? "straight" : undefined,
+      style: isSibling
+        ? {
+            stroke: "var(--semi-color-text-2, #86909C)",
+            strokeDasharray: "4 4",
+            strokeWidth: 1,
+            opacity: 0.7,
+          }
+        : undefined,
+      data: isSibling ? { parallelSibling: true } : undefined,
+      selectable: !isSibling,
+    } as Edge;
   });
-
-  const edges: Edge[] = (def.edges || []).map((e, i) => ({
-    id: `e-${e.from}-${e.to}-${i}`,
-    source: e.from,
-    target: e.to,
-    sourceHandle: e.branch || undefined,
-    label: e.label || e.condition || undefined,
-    // Stash the raw backend fields on edge.data so they round-trip through
-    // flowToDefinition() and are not silently dropped on save.
-    data: {
-      condition: e.condition,
-      branch: e.branch,
-      label: e.label,
-    },
-    animated: false,
-    style: { strokeWidth: 2 },
-  }));
-
   return { nodes, edges };
 }
 
-// Convert React Flow format → backend Definition
-export function flowToDefinition(
-  nodes: Node[],
-  edges: Edge[],
-  existingDef?: Partial<Definition>,
-): Definition {
-  const triggerNodes = nodes.filter((n) => n.type === 'trigger');
-  const normalNodes = nodes.filter((n) => n.type !== 'trigger');
-
-  const nodeDefs: NodeDef[] = normalNodes.map((n) => {
-    const { label, nodeType, ...config } = n.data as Record<string, any>;
-    return {
-      id: n.id,
-      type: (nodeType || n.type) as NodeType,
-      label: label as string,
-      config,
-      position: n.position,
-    };
-  });
-
-  const edgeDefs: EdgeDef[] = edges.map((e) => {
-    const data = (e.data as { condition?: string; branch?: string; label?: string } | undefined) || {};
-    return {
-      from: e.source,
-      to: e.target,
-      // condition / branch / label live on edge.data so they survive a
-      // definition → flow → definition round-trip. sourceHandle is a fallback
-      // for edges authored interactively from a branched node handle.
-      condition: data.condition || undefined,
-      branch: data.branch || e.sourceHandle || undefined,
-      label: (typeof e.label === 'string' ? e.label : undefined) || data.label || undefined,
-    };
-  });
-
-  const triggers = triggerNodes.map((n) => ({
-    id: n.id.replace('trigger-', ''),
-    type: ((n.data as any).triggerType as TriggerType) || 'manual',
-    config: (n.data as any).config || {},
-  }));
-
+function fromReactFlow(nodes: Node[], edges: Edge[]): FlowDefinition {
   return {
-    nodes: nodeDefs,
-    edges: edgeDefs,
-    triggers,
-    concurrency: existingDef?.concurrency,
-    variables: existingDef?.variables,
+    nodes: nodes.map((n) => ({
+      id: n.id,
+      type: (n.data as { nodeType: NodeType }).nodeType,
+      position: n.position,
+      config: (n.data as { config: FlowNodeConfig }).config ?? {},
+    })),
+    edges: edges
+      // Synthetic sibling edges are layout-only — never persist them back
+      // into the user-authored definition.
+      .filter((e) => !isParallelSiblingEdge(e.id))
+      .map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        label: typeof e.label === "string" ? e.label : undefined,
+        branch: typeof e.label === "string" ? e.label : undefined,
+      })),
   };
 }
 
-interface FlowEditorProps {
-  initialDefinition?: Definition;
-  onDefinitionChange?: (def: Definition) => void;
-  readOnly?: boolean;
-  className?: string;
-}
-
-let nodeIdCounter = 0;
-function getNodeId() {
-  return `node_${Date.now()}_${++nodeIdCounter}`;
-}
-
-// Small debounce helper — avoid pulling in lodash for one usage.
-function debounce<T extends (...args: any[]) => void>(fn: T, wait: number) {
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  const debounced = (...args: Parameters<T>) => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
-      timer = null;
-      fn(...args);
-    }, wait);
-  };
-  debounced.cancel = () => {
-    if (timer) {
-      clearTimeout(timer);
-      timer = null;
-    }
-  };
-  return debounced as T & { cancel: () => void };
-}
-
-const FlowEditor: React.FC<FlowEditorProps> = ({
-  initialDefinition,
-  onDefinitionChange,
-  readOnly = false,
-  className,
-}) => {
-  const reactFlowWrapper = useRef<HTMLDivElement>(null);
-  const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
-  const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+function FlowEditorInner({
+  definition,
+  onChange,
+  readOnly,
+  statusByNode,
+  selectedNodeId: controlledSelected,
+  onSelectNode,
+  webhookUrl,
+}: FlowEditorProps) {
+  const { screenToFlowPosition } = useReactFlow();
+  const wrapperRef = useRef<HTMLDivElement>(null);
 
   const initial = useMemo(
-    () =>
-      initialDefinition
-        ? definitionToFlow(initialDefinition)
-        : { nodes: [], edges: [] },
-    // We intentionally compute initial once based on the first prop value;
-    // subsequent prop changes are handled by the effect below.
+    () => toReactFlow(definition, statusByNode, readOnly),
+    // intentional: layout reflows on read-only toggle and definition change
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+    [definition, readOnly],
   );
+  const [nodes, setNodes] = useState<Node[]>(initial.nodes);
+  const [edges, setEdges] = useState<Edge[]>(initial.edges);
+  const [selectedId, setSelectedId] = useState<string | null>(controlledSelected ?? null);
 
-  const [nodes, setNodes, onNodesChange] = useNodesState(initial.nodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initial.edges);
+  // Resync from outside when the upstream definition reference changes — this
+  // happens after Save / load. Use a JSON shallow check to avoid clobbering
+  // local in-flight edits when the parent merely re-renders with the same
+  // logical content.
+  const lastUpstreamRef = useRef(definition);
+  if (lastUpstreamRef.current !== definition) {
+    lastUpstreamRef.current = definition;
+    const next = toReactFlow(definition, statusByNode, readOnly);
+    setNodes(next.nodes);
+    setEdges(next.edges);
+  }
 
-  // P0-6: useNodesState seeds once with its initial argument and then ignores
-  // subsequent changes to `initialDefinition`. Mirror prop changes back into
-  // local state so navigating between flows (or reloading) shows fresh data.
-  // We diff via JSON.stringify to avoid resetting on identity-only re-renders.
-  const initialDefKey = useMemo(
-    () => (initialDefinition ? JSON.stringify(initialDefinition) : ''),
-    [initialDefinition],
-  );
-  const lastAppliedKey = useRef<string>(initialDefKey);
-  useEffect(() => {
-    if (initialDefKey === lastAppliedKey.current) return;
-    lastAppliedKey.current = initialDefKey;
-    if (initialDefinition) {
-      const next = definitionToFlow(initialDefinition);
-      setNodes(next.nodes);
-      setEdges(next.edges);
-    } else {
-      setNodes([]);
-      setEdges([]);
-    }
-  }, [initialDefKey, initialDefinition, setNodes, setEdges]);
+  // Re-derive status overlay without losing local node positions.
+  React.useEffect(() => {
+    if (!statusByNode) return;
+    setNodes((cur) => cur.map((n) => ({ ...n, data: { ...n.data, status: statusByNode[n.id] } })));
+  }, [statusByNode]);
 
-  // Connect edges
-  const onConnect = useCallback(
-    (params: Connection) => {
-      setEdges((eds) =>
-        addEdge(
-          {
-            ...params,
-            animated: false,
-            style: { strokeWidth: 2 },
-            data: { branch: params.sourceHandle || undefined },
-          },
-          eds,
-        ),
-      );
+  React.useEffect(() => {
+    if (controlledSelected !== undefined) setSelectedId(controlledSelected);
+  }, [controlledSelected]);
+
+  const emit = useCallback(
+    (nextNodes: Node[], nextEdges: Edge[]) => {
+      onChange(fromReactFlow(nextNodes, nextEdges));
     },
-    [setEdges],
+    [onChange],
   );
 
-  // Drop handler: add node from sidebar
-  const onDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = 'move';
-  }, []);
-
-  const onDrop = useCallback(
-    (event: DragEvent<HTMLDivElement>) => {
-      event.preventDefault();
-      const raw = event.dataTransfer.getData('application/dmworkflow-node');
-      if (!raw || !reactFlowInstance || !reactFlowWrapper.current) return;
-
-      const { type, label, icon, triggerType } = JSON.parse(raw) as {
-        type: NodeType;
-        label: string;
-        icon: string;
-        triggerType?: TriggerType;
-      };
-
-      const bounds = reactFlowWrapper.current.getBoundingClientRect();
-      const position = reactFlowInstance.screenToFlowPosition({
-        x: event.clientX - bounds.left,
-        y: event.clientY - bounds.top,
+  const handleNodesChange = useCallback(
+    (changes: NodeChange[]) => {
+      setNodes((cur) => {
+        const next = applyNodeChanges(changes, cur);
+        if (!readOnly) emit(next, edges);
+        return next;
       });
-
-      const data: Record<string, any> = { label, icon, nodeType: type };
-      if (type === 'trigger') {
-        data.triggerType = triggerType || 'manual';
-        data.config = {};
-      }
-
-      const newNode: Node = {
-        id: type === 'trigger' ? `trigger-${getNodeId()}` : getNodeId(),
-        type,
-        position,
-        data,
-      };
-
-      setNodes((nds) => [...nds, newNode]);
     },
-    [reactFlowInstance, setNodes],
+    [edges, emit, readOnly],
   );
 
-  // Node click → open config panel
-  const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
-    setSelectedNode(node);
+  const handleEdgesChange = useCallback(
+    (changes: EdgeChange[]) => {
+      setEdges((cur) => {
+        const next = applyEdgeChanges(changes, cur);
+        if (!readOnly) emit(nodes, next);
+        return next;
+      });
+    },
+    [nodes, emit, readOnly],
+  );
+
+  const handleConnect = useCallback(
+    (conn: Connection) => {
+      setEdges((cur) => {
+        const next = addEdge({ ...conn, id: `e_${Date.now()}_${Math.random().toString(36).slice(2, 8)}` }, cur);
+        if (!readOnly) emit(nodes, next);
+        return next;
+      });
+    },
+    [nodes, emit, readOnly],
+  );
+
+  const handleDrop = useCallback(
+    (event: React.DragEvent) => {
+      if (readOnly) return;
+      event.preventDefault();
+      const nodeType = event.dataTransfer.getData("application/octo-flow-node-type") as NodeType;
+      if (!nodeType) return;
+      const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      const id = `n_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const node: Node = {
+        id,
+        type: "flowNode",
+        position,
+        data: { nodeType, config: {} },
+      };
+      setNodes((cur) => {
+        const next = [...cur, node];
+        emit(next, edges);
+        return next;
+      });
+    },
+    [edges, emit, readOnly, screenToFlowPosition],
+  );
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
   }, []);
 
-  // Update node data from config panel
-  const onNodeUpdate = useCallback(
-    (id: string, data: Record<string, any>) => {
-      setNodes((nds) =>
-        nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...data } } : n)),
-      );
-      setSelectedNode(null);
+  const handleNodeClick = useCallback(
+    (_e: React.MouseEvent, node: Node) => {
+      setSelectedId(node.id);
+      onSelectNode?.(node.id);
     },
-    [setNodes],
+    [onSelectNode],
   );
 
-  // Expose definition changes
-  const handleNodesChange: typeof onNodesChange = useCallback(
-    (changes) => {
-      onNodesChange(changes);
-      // We can't read the updated nodes synchronously here; parent uses getDefinition()
+  const handlePaneClick = useCallback(() => {
+    setSelectedId(null);
+    onSelectNode?.(null);
+  }, [onSelectNode]);
+
+  const selectedFlowNode: FlowNode | null = useMemo(() => {
+    if (!selectedId) return null;
+    const n = nodes.find((x) => x.id === selectedId);
+    if (!n) return null;
+    return {
+      id: n.id,
+      type: (n.data as { nodeType: NodeType }).nodeType,
+      position: n.position,
+      config: (n.data as { config: FlowNodeConfig }).config ?? {},
+    };
+  }, [nodes, selectedId]);
+
+  const updateNodeConfig = useCallback(
+    (nodeId: string, patchObj: Partial<FlowNodeConfig>) => {
+      setNodes((cur) => {
+        const next = cur.map((n) =>
+          n.id === nodeId
+            ? {
+                ...n,
+                data: {
+                  ...n.data,
+                  config: { ...(n.data as { config: FlowNodeConfig }).config, ...patchObj },
+                },
+              }
+            : n,
+        );
+        emit(next, edges);
+        return next;
+      });
     },
-    [onNodesChange],
+    [edges, emit],
   );
 
-  // Public method: get current definition
-  // Exposed via ref or called by parent
-  const getDefinition = useCallback(
-    (): Definition => flowToDefinition(nodes, edges, initialDefinition),
-    [nodes, edges, initialDefinition],
+  const deleteNode = useCallback(
+    (nodeId: string) => {
+      setNodes((cur) => {
+        const nextNodes = cur.filter((n) => n.id !== nodeId);
+        setEdges((curE) => {
+          const nextE = curE.filter((e) => e.source !== nodeId && e.target !== nodeId);
+          emit(nextNodes, nextE);
+          return nextE;
+        });
+        return nextNodes;
+      });
+      setSelectedId(null);
+      onSelectNode?.(null);
+    },
+    [emit, onSelectNode],
   );
-
-  // P1-13: debounce parent notifications so we don't fire a full serialization
-  // on every 60fps drag tick. 300ms is the sweet spot between snappy autosave
-  // hints and not melting the main thread during a long drag.
-  const debouncedNotify = useMemo(
-    () =>
-      debounce((def: Definition) => {
-        onDefinitionChange?.(def);
-      }, 300),
-    [onDefinitionChange],
-  );
-  useEffect(() => () => debouncedNotify.cancel(), [debouncedNotify]);
-
-  // Notify parent on changes
-  useEffect(() => {
-    if (onDefinitionChange) {
-      debouncedNotify(getDefinition());
-    }
-  }, [nodes, edges]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div className={`flow-editor ${className || ''}`}>
-      {!readOnly && <NodeSidebar />}
-      <div
-        className="flow-editor__canvas"
-        ref={reactFlowWrapper}
-        onDragOver={onDragOver}
-        onDrop={onDrop}
-      >
+    <div ref={wrapperRef} style={{ display: "flex", flex: 1, minHeight: 0 }}>
+      {!readOnly && <Sidebar />}
+      <div style={{ flex: 1, minWidth: 0 }} onDrop={handleDrop} onDragOver={handleDragOver}>
         <ReactFlow
           nodes={nodes}
           edges={edges}
-          onNodesChange={readOnly ? undefined : handleNodesChange}
-          onEdgesChange={readOnly ? undefined : onEdgesChange}
-          onConnect={readOnly ? undefined : onConnect}
-          onNodeClick={readOnly ? undefined : onNodeClick}
-          onInit={setReactFlowInstance}
           nodeTypes={nodeTypes}
+          onNodesChange={handleNodesChange}
+          onEdgesChange={handleEdgesChange}
+          onConnect={readOnly ? undefined : handleConnect}
+          onNodeClick={handleNodeClick}
+          onPaneClick={handlePaneClick}
+          nodesDraggable={!readOnly}
+          nodesConnectable={!readOnly}
+          elementsSelectable
           fitView
-          deleteKeyCode={readOnly ? null : 'Delete'}
-          snapToGrid
-          snapGrid={[16, 16]}
         >
-          <Background variant={BackgroundVariant.Dots} gap={16} size={1} />
+          <Background gap={16} />
           <Controls />
-          <MiniMap
-            nodeStrokeColor={(n) => NODE_TYPE_COLORS[n.type || ''] || '#999'}
-            nodeColor={(n) => {
-              const c = NODE_TYPE_COLORS[n.type || ''] || '#eee';
-              return c + '33'; // 20% opacity
-            }}
-            style={{ backgroundColor: '#f8f9fa' }}
-          />
+          <MiniMap pannable zoomable />
         </ReactFlow>
       </div>
-      {!readOnly && (
+      {!readOnly && selectedFlowNode && (
         <NodeConfigPanel
-          node={selectedNode}
-          onUpdate={onNodeUpdate}
-          onClose={() => setSelectedNode(null)}
+          node={selectedFlowNode}
+          webhookUrl={webhookUrl}
+          onChange={updateNodeConfig}
+          onClose={() => {
+            setSelectedId(null);
+            onSelectNode?.(null);
+          }}
+          onDelete={deleteNode}
         />
       )}
     </div>
   );
-};
+}
 
-export default FlowEditor;
-export { getNodeId };
+// Re-export for ExecutionView compatibility
+export { definitionToFlow } from '../utils/flowCompat';
+
+export default function FlowEditor(props: FlowEditorProps) {
+  return (
+    <ReactFlowProvider>
+      <FlowEditorInner {...props} />
+    </ReactFlowProvider>
+  );
+}
