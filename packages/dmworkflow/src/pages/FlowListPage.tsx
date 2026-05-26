@@ -10,7 +10,8 @@ import {
   listFlows,
 } from "../api/flowApi";
 import type { ExecutionStatus, Flow, FlowStatus } from "../types/flow";
-import { FLOW_TEMPLATES, findTemplate } from "../utils/flowTemplates";
+import FlowEditorPage from "./FlowEditorPage";
+import FlowExecutionsPage from "./FlowExecutionsPage";
 
 const STATUS_COLOR: Record<FlowStatus, "grey" | "green" | "amber"> = {
   draft: "grey",
@@ -32,7 +33,6 @@ export default function FlowListPage() {
   const [creating, setCreating] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [draftName, setDraftName] = useState("");
-  const [draftTemplateId, setDraftTemplateId] = useState<string>("blank");
 
   const load = useCallback(() => {
     setLoading(true);
@@ -46,18 +46,18 @@ export default function FlowListPage() {
     load();
   }, [load]);
 
+  // 注意：列表页 (`/flow`) 由模块菜单 onPress 通过 `WKApp.routeRight.replaceToRoot`
+  // 挂在右侧主区域，下面的子页面也必须通过同一个 routeRight 推进，否则 `WKApp.route.push`
+  // 仅会调用 `restContent`，没有任何 listener 把它渲染出来 → 点击列表项无反应
+  // (YUJ-2070, Bug 2)。统一沿用 SummaryListPage 的 popToRoot + push 范式。
   const openEditor = (id: string) => {
-    WKApp.route.push("/flow/edit", { flowId: id });
+    WKApp.routeRight.popToRoot();
+    WKApp.routeRight.push(<FlowEditorPage flowId={id} />);
   };
 
   const openExecutions = (id: string) => {
-    WKApp.route.push("/flow/executions", { flowId: id });
-  };
-
-  const openCreate = () => {
-    setDraftName("");
-    setDraftTemplateId("blank");
-    setCreateOpen(true);
+    WKApp.routeRight.popToRoot();
+    WKApp.routeRight.push(<FlowExecutionsPage flowId={id} />);
   };
 
   const handleCreate = async () => {
@@ -66,17 +66,14 @@ export default function FlowListPage() {
       Toast.warning("请输入 Flow 名称");
       return;
     }
-    const template = findTemplate(draftTemplateId) ?? findTemplate("blank")!;
     setCreating(true);
     try {
       const flow = await createFlow({
         name,
-        description: template.id === "blank" ? undefined : `From template: ${template.label}`,
-        definition: template.build(),
+        definition: { nodes: [], edges: [] },
       });
       setCreateOpen(false);
       setDraftName("");
-      setDraftTemplateId("blank");
       openEditor(flow.id);
     } catch (e) {
       Toast.error(`创建失败：${(e as Error).message}`);
@@ -110,7 +107,7 @@ export default function FlowListPage() {
       <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
         <div style={{ fontSize: 18, fontWeight: 600, flex: 1 }}>Octo Flow</div>
         <Button icon={<IconRefresh />} onClick={load} style={{ marginRight: 8 }}>刷新</Button>
-        <Button type="primary" icon={<IconPlus />} onClick={openCreate}>
+        <Button type="primary" icon={<IconPlus />} onClick={() => setCreateOpen(true)}>
           新建 Flow
         </Button>
       </div>
@@ -181,60 +178,9 @@ export default function FlowListPage() {
         onOk={handleCreate}
         confirmLoading={creating}
         okText="创建"
-        width={520}
       >
         <div style={{ fontSize: 12, marginBottom: 4 }}>名称</div>
         <Input value={draftName} onChange={setDraftName} placeholder="my-first-flow" />
-
-        <div style={{ fontSize: 12, marginTop: 16, marginBottom: 6 }}>模板</div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {FLOW_TEMPLATES.map((tpl) => {
-            const active = tpl.id === draftTemplateId;
-            return (
-              <div
-                key={tpl.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => setDraftTemplateId(tpl.id)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    setDraftTemplateId(tpl.id);
-                  }
-                }}
-                style={{
-                  cursor: "pointer",
-                  padding: "10px 12px",
-                  border: `1px solid ${active ? "var(--semi-color-primary)" : "var(--semi-color-border)"}`,
-                  borderRadius: 6,
-                  background: active ? "var(--semi-color-primary-light-default)" : "transparent",
-                  outline: "none",
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: 10,
-                }}
-              >
-                <div
-                  style={{
-                    width: 14,
-                    height: 14,
-                    borderRadius: "50%",
-                    border: `2px solid ${active ? "var(--semi-color-primary)" : "var(--semi-color-border)"}`,
-                    background: active ? "var(--semi-color-primary)" : "transparent",
-                    flexShrink: 0,
-                    marginTop: 3,
-                  }}
-                />
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 500, fontSize: 13 }}>{tpl.label}</div>
-                  <div style={{ fontSize: 12, color: "var(--semi-color-text-2)", marginTop: 2 }}>
-                    {tpl.description}
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
       </Modal>
     </div>
   );
