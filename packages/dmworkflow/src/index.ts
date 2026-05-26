@@ -1,5 +1,7 @@
 import './styles/flow.css';
 
+export { default as FlowModule } from './module';
+
 export * from './types';
 export * from './api';
 export { default as FlowEditor } from './components/FlowEditor';
