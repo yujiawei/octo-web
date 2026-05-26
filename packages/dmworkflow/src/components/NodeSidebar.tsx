@@ -1,5 +1,5 @@
 import React, { useState, useCallback, type DragEvent } from 'react';
-import { NODE_CATEGORIES, type NodeCategoryItem, type NodeType } from '../types';
+import { NODE_CATEGORIES, type NodeCategoryItem } from '../types';
 
 interface NodeSidebarProps {
   className?: string;
@@ -20,7 +20,14 @@ const NodeSidebar: React.FC<NodeSidebarProps> = ({ className }) => {
       }
       event.dataTransfer.setData(
         'application/dmworkflow-node',
-        JSON.stringify({ type: item.type, label: item.label, icon: item.icon }),
+        // triggerType travels with the payload so the editor can distinguish
+        // webhook / cron / manual triggers when constructing the dropped node.
+        JSON.stringify({
+          type: item.type,
+          label: item.label,
+          icon: item.icon,
+          triggerType: item.triggerType,
+        }),
       );
       event.dataTransfer.effectAllowed = 'move';
     },

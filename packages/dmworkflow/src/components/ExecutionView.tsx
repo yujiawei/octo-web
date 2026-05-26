@@ -7,10 +7,17 @@ import {
   type Edge,
   BackgroundVariant,
 } from '@xyflow/react';
-import type { Execution, NodeExecution, NODE_EXEC_STATUS_COLORS } from '../types';
+import type { Execution, NodeExecution, Definition } from '../types';
+import { definitionToFlow } from './FlowEditor';
 
 interface ExecutionViewProps {
   execution: Execution;
+  /**
+   * Flow definition that produced this execution. When provided, the canvas
+   * uses the real topology (nodes, edges, positions) authored in the editor
+   * instead of a fake linear sequence keyed off the NodeExecution array order.
+   */
+  definition?: Definition;
   className?: string;
 }
 
@@ -61,7 +68,7 @@ const formatDuration = (start: string | null, end: string | null): string => {
   return `${(ms / 60000).toFixed(1)}m`;
 };
 
-const ExecutionView: React.FC<ExecutionViewProps> = ({ execution, className }) => {
+const ExecutionView: React.FC<ExecutionViewProps> = ({ execution, definition, className }) => {
   const [selectedNode, setSelectedNode] = useState<NodeExecution | null>(null);
 
   const nodeExecMap = useMemo(() => {
@@ -70,8 +77,62 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({ execution, className }) =
     return map;
   }, [execution.nodes]);
 
-  // Build React Flow nodes from execution data
+  // Build React Flow nodes/edges.
+  //
+  // P0-5: when the caller hands us the flow Definition, render the real graph
+  // (preserving positions and edges authored in the editor) and overlay the
+  // per-node execution status on top. Falling back to a synthetic linear
+  // sequence is only acceptable when no definition is available (e.g. legacy
+  // call sites) — and even then we make it obvious that ordering is best-effort.
   const { nodes, edges } = useMemo(() => {
+    if (definition) {
+      const { nodes: defNodes, edges: defEdges } = definitionToFlow(definition);
+
+      const flowNodes: Node[] = defNodes.map((n) => {
+        const ne = nodeExecMap.get(n.id);
+        const status = ne?.status || 'pending';
+        const color = statusColor(status);
+        const baseLabel =
+          (n.data as { label?: string })?.label ||
+          (n.data as { nodeType?: string })?.nodeType ||
+          n.type ||
+          n.id;
+        return {
+          ...n,
+          // Replace the editor's custom node renderers with a plain default
+          // node so the execution view stays self-contained and doesn't pull
+          // in unrelated editor styling / handles.
+          type: 'default',
+          data: {
+            label: (
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ fontWeight: 600 }}>{baseLabel}</div>
+                <div style={{ fontSize: 11, color }}>{statusLabel(status)}</div>
+              </div>
+            ),
+          },
+          style: {
+            border: `2px solid ${color}`,
+            borderRadius: 8,
+            padding: 8,
+            background: status === 'running' ? '#EFF6FF' : '#fff',
+          },
+        } as Node;
+      });
+
+      const flowEdges: Edge[] = defEdges.map((e) => {
+        const sourceStatus = nodeExecMap.get(e.source)?.status;
+        return {
+          ...e,
+          animated: sourceStatus === 'running',
+        };
+      });
+
+      return { nodes: flowNodes, edges: flowEdges };
+    }
+
+    // Fallback: no definition — fall back to the legacy linear layout but
+    // mark it visually so users know this is not the real topology.
     const flowNodes: Node[] = (execution.nodes || []).map((ne, idx) => ({
       id: ne.node_id,
       type: 'default',
@@ -94,7 +155,6 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({ execution, className }) =
       },
     }));
 
-    // Simple sequential edges for now
     const flowEdges: Edge[] = [];
     for (let i = 0; i < flowNodes.length - 1; i++) {
       flowEdges.push({
@@ -106,7 +166,7 @@ const ExecutionView: React.FC<ExecutionViewProps> = ({ execution, className }) =
     }
 
     return { nodes: flowNodes, edges: flowEdges };
-  }, [execution.nodes]);
+  }, [definition, execution.nodes, nodeExecMap]);
 
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {

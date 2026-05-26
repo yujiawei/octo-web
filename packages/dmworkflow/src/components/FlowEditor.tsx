@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useMemo, type DragEvent } from 'react';
+import React, { useState, useCallback, useRef, useMemo, useEffect, type DragEvent } from 'react';
 import {
   ReactFlow,
   addEdge,
@@ -16,7 +16,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import type { Definition, NodeDef, EdgeDef, NodeType } from '../types';
+import type { Definition, NodeDef, EdgeDef, NodeType, TriggerType } from '../types';
 import { NODE_TYPE_COLORS } from '../types';
 import TriggerNode from './custom-nodes/TriggerNode';
 import ScriptNode from './custom-nodes/ScriptNode';
@@ -77,6 +77,13 @@ export function definitionToFlow(def: Definition): { nodes: Node[]; edges: Edge[
     target: e.to,
     sourceHandle: e.branch || undefined,
     label: e.label || e.condition || undefined,
+    // Stash the raw backend fields on edge.data so they round-trip through
+    // flowToDefinition() and are not silently dropped on save.
+    data: {
+      condition: e.condition,
+      branch: e.branch,
+      label: e.label,
+    },
     animated: false,
     style: { strokeWidth: 2 },
   }));
@@ -104,16 +111,23 @@ export function flowToDefinition(
     };
   });
 
-  const edgeDefs: EdgeDef[] = edges.map((e) => ({
-    from: e.source,
-    to: e.target,
-    branch: e.sourceHandle || undefined,
-    label: (e.label as string) || undefined,
-  }));
+  const edgeDefs: EdgeDef[] = edges.map((e) => {
+    const data = (e.data as { condition?: string; branch?: string; label?: string } | undefined) || {};
+    return {
+      from: e.source,
+      to: e.target,
+      // condition / branch / label live on edge.data so they survive a
+      // definition → flow → definition round-trip. sourceHandle is a fallback
+      // for edges authored interactively from a branched node handle.
+      condition: data.condition || undefined,
+      branch: data.branch || e.sourceHandle || undefined,
+      label: (typeof e.label === 'string' ? e.label : undefined) || data.label || undefined,
+    };
+  });
 
   const triggers = triggerNodes.map((n) => ({
     id: n.id.replace('trigger-', ''),
-    type: (n.data as any).triggerType || 'manual',
+    type: ((n.data as any).triggerType as TriggerType) || 'manual',
     config: (n.data as any).config || {},
   }));
 
@@ -138,6 +152,25 @@ function getNodeId() {
   return `node_${Date.now()}_${++nodeIdCounter}`;
 }
 
+// Small debounce helper — avoid pulling in lodash for one usage.
+function debounce<T extends (...args: any[]) => void>(fn: T, wait: number) {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const debounced = (...args: Parameters<T>) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      fn(...args);
+    }, wait);
+  };
+  debounced.cancel = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+  return debounced as T & { cancel: () => void };
+}
+
 const FlowEditor: React.FC<FlowEditorProps> = ({
   initialDefinition,
   onDefinitionChange,
@@ -153,16 +186,51 @@ const FlowEditor: React.FC<FlowEditorProps> = ({
       initialDefinition
         ? definitionToFlow(initialDefinition)
         : { nodes: [], edges: [] },
-    [initialDefinition],
+    // We intentionally compute initial once based on the first prop value;
+    // subsequent prop changes are handled by the effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
   );
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initial.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initial.edges);
 
+  // P0-6: useNodesState seeds once with its initial argument and then ignores
+  // subsequent changes to `initialDefinition`. Mirror prop changes back into
+  // local state so navigating between flows (or reloading) shows fresh data.
+  // We diff via JSON.stringify to avoid resetting on identity-only re-renders.
+  const initialDefKey = useMemo(
+    () => (initialDefinition ? JSON.stringify(initialDefinition) : ''),
+    [initialDefinition],
+  );
+  const lastAppliedKey = useRef<string>(initialDefKey);
+  useEffect(() => {
+    if (initialDefKey === lastAppliedKey.current) return;
+    lastAppliedKey.current = initialDefKey;
+    if (initialDefinition) {
+      const next = definitionToFlow(initialDefinition);
+      setNodes(next.nodes);
+      setEdges(next.edges);
+    } else {
+      setNodes([]);
+      setEdges([]);
+    }
+  }, [initialDefKey, initialDefinition, setNodes, setEdges]);
+
   // Connect edges
   const onConnect = useCallback(
     (params: Connection) => {
-      setEdges((eds) => addEdge({ ...params, animated: false, style: { strokeWidth: 2 } }, eds));
+      setEdges((eds) =>
+        addEdge(
+          {
+            ...params,
+            animated: false,
+            style: { strokeWidth: 2 },
+            data: { branch: params.sourceHandle || undefined },
+          },
+          eds,
+        ),
+      );
     },
     [setEdges],
   );
@@ -179,10 +247,11 @@ const FlowEditor: React.FC<FlowEditorProps> = ({
       const raw = event.dataTransfer.getData('application/dmworkflow-node');
       if (!raw || !reactFlowInstance || !reactFlowWrapper.current) return;
 
-      const { type, label, icon } = JSON.parse(raw) as {
+      const { type, label, icon, triggerType } = JSON.parse(raw) as {
         type: NodeType;
         label: string;
         icon: string;
+        triggerType?: TriggerType;
       };
 
       const bounds = reactFlowWrapper.current.getBoundingClientRect();
@@ -191,11 +260,17 @@ const FlowEditor: React.FC<FlowEditorProps> = ({
         y: event.clientY - bounds.top,
       });
 
+      const data: Record<string, any> = { label, icon, nodeType: type };
+      if (type === 'trigger') {
+        data.triggerType = triggerType || 'manual';
+        data.config = {};
+      }
+
       const newNode: Node = {
-        id: getNodeId(),
+        id: type === 'trigger' ? `trigger-${getNodeId()}` : getNodeId(),
         type,
         position,
-        data: { label, icon, nodeType: type },
+        data,
       };
 
       setNodes((nds) => [...nds, newNode]);
@@ -235,10 +310,22 @@ const FlowEditor: React.FC<FlowEditorProps> = ({
     [nodes, edges, initialDefinition],
   );
 
+  // P1-13: debounce parent notifications so we don't fire a full serialization
+  // on every 60fps drag tick. 300ms is the sweet spot between snappy autosave
+  // hints and not melting the main thread during a long drag.
+  const debouncedNotify = useMemo(
+    () =>
+      debounce((def: Definition) => {
+        onDefinitionChange?.(def);
+      }, 300),
+    [onDefinitionChange],
+  );
+  useEffect(() => () => debouncedNotify.cancel(), [debouncedNotify]);
+
   // Notify parent on changes
-  React.useEffect(() => {
+  useEffect(() => {
     if (onDefinitionChange) {
-      onDefinitionChange(getDefinition());
+      debouncedNotify(getDefinition());
     }
   }, [nodes, edges]); // eslint-disable-line react-hooks/exhaustive-deps
 

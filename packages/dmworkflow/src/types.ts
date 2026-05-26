@@ -32,6 +32,7 @@ export interface NodeDef {
 }
 
 export type NodeType =
+  | 'trigger'
   | 'script'
   | 'http'
   | 'condition'
@@ -110,6 +111,12 @@ export interface NodeCategoryItem {
   label: string;
   icon: string;
   disabled?: boolean;
+  /**
+   * For trigger items, the concrete trigger flavour (webhook / cron / manual / ...).
+   * Used by the editor to pre-populate `data.triggerType` on drop so dropped
+   * trigger nodes carry the right kind instead of all collapsing to one.
+   */
+  triggerType?: TriggerType;
 }
 
 export const NODE_CATEGORIES: NodeCategory[] = [
@@ -117,9 +124,9 @@ export const NODE_CATEGORIES: NodeCategory[] = [
     label: '触发器',
     color: '#3B82F6',
     items: [
-      { type: 'script', label: 'Webhook', icon: '⚡' },
-      { type: 'script', label: 'Cron', icon: '⏰' },
-      { type: 'script', label: '手动触发', icon: '👆' },
+      { type: 'trigger', label: 'Webhook', icon: '⚡', triggerType: 'webhook' },
+      { type: 'trigger', label: 'Cron', icon: '⏰', triggerType: 'cron' },
+      { type: 'trigger', label: '手动触发', icon: '👆', triggerType: 'manual' },
     ],
   },
   {

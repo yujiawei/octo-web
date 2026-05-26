@@ -11,6 +11,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     const body = await res.text().catch(() => '');
     throw new Error(`API ${res.status}: ${body}`);
   }
+  // 204 No Content (delete / activate / deactivate) has an empty body —
+  // calling res.json() on it throws SyntaxError. Return undefined instead.
+  if (res.status === 204) {
+    return undefined as T;
+  }
   return res.json();
 }
 

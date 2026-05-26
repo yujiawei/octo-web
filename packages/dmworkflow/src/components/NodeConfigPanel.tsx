@@ -82,7 +82,20 @@ const NodeConfigPanel: React.FC<NodeConfigPanelProps> = ({
 
   useEffect(() => {
     if (node) {
-      setLocalData({ ...(node.data as Record<string, any>) });
+      const data = { ...(node.data as Record<string, any>) };
+      // Hydrate the editor-only `headers_list` (array of {key,value}) from the
+      // backend's `headers` Record, so the KV editor can display existing values.
+      if (
+        data.nodeType === 'http' &&
+        !Array.isArray(data.headers_list) &&
+        data.headers &&
+        typeof data.headers === 'object'
+      ) {
+        data.headers_list = Object.entries(data.headers as Record<string, string>).map(
+          ([key, value]) => ({ key, value: String(value ?? '') }),
+        );
+      }
+      setLocalData(data);
     }
   }, [node]);
 
@@ -94,9 +107,22 @@ const NodeConfigPanel: React.FC<NodeConfigPanelProps> = ({
   );
 
   const save = useCallback(() => {
-    if (node) {
-      onUpdate(node.id, localData);
+    if (!node) return;
+    // Translate the editor-only `headers_list` (array of {key,value}) into the
+    // backend-shaped `headers` Record<string,string> before saving. We strip
+    // the intermediate field so it does not leak into the persisted config.
+    const out: Record<string, any> = { ...localData };
+    if (Array.isArray(out.headers_list)) {
+      const headers: Record<string, string> = {};
+      for (const pair of out.headers_list as KVPair[]) {
+        const k = (pair.key || '').trim();
+        if (!k) continue;
+        headers[k] = pair.value ?? '';
+      }
+      out.headers = headers;
+      delete out.headers_list;
     }
+    onUpdate(node.id, out);
   }, [node, localData, onUpdate]);
 
   if (!node) return null;

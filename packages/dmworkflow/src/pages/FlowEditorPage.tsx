@@ -227,7 +227,7 @@ const FlowEditorPage: React.FC<FlowEditorPageProps> = ({ flowId, onBack }) => {
       )}
 
       {viewMode === 'execution' && selectedExecution && (
-        <ExecutionView execution={selectedExecution} />
+        <ExecutionView execution={selectedExecution} definition={flow.definition} />
       )}
     </div>
   );
